@@ -14,14 +14,15 @@ app = Client(
     "CaptionBot",
     api_id=API_ID,
     api_hash=API_HASH,
-    bot_token=BOT_TOKEN
+    bot_token=BOT_TOKEN,
+    parse_mode=enums.ParseMode.HTML # Global HTML support
 )
 
 user_data = {}
 
 def extract_episode(caption):
     if not caption: return "N/A"
-    # Episode nikalne ka sabse tagda regex
+    # Yuri on Ice wale format se episode nikalne ke liye
     match = re.search(r'(?:Episode|Ep|E)\s*[:\-\s]*(\d+)', caption, re.IGNORECASE)
     if not match:
         match = re.search(r'(\d+)', caption)
@@ -31,7 +32,7 @@ def extract_episode(caption):
 async def start(client, message):
     if message.from_user.id != OWNER_ID: return
     user_data[message.from_user.id] = {"queue": []}
-    await message.reply_text("✅ **Bot Ready!**\nAb videos bhejiye, phir `/done` likh kar apna HTML caption bhejna.")
+    await message.reply_text("✅ **Bot Fixed & Quote Ready!**\nAb videos order se bhejiye.")
 
 @app.on_message(filters.video & filters.private)
 async def collect_videos(client, message: Message):
@@ -39,7 +40,7 @@ async def collect_videos(client, message: Message):
     user_id = message.from_user.id
     if user_id not in user_data: user_data[user_id] = {"queue": []}
     user_data[user_id]["queue"].append(message)
-    await message.reply_text(f"📥 Added to Queue: `{len(user_data[user_id]['queue'])}`", quote=True)
+    await message.reply_text(f"📥 Queued: `{len(user_data[user_id]['queue'])}`", quote=True)
 
 @app.on_message(filters.command("done") & filters.private)
 async def mark_done(client, message):
@@ -47,7 +48,7 @@ async def mark_done(client, message):
     if user_id not in user_data or not user_data[user_id]["queue"]:
         return await message.reply_text("❌ Queue khali hai!")
     user_data[user_id]["state"] = "awaiting_caption"
-    await message.reply_text("📝 **Ab naya Caption bhejo (HTML Tags ke saath).**\n\nExample:\n<code>&lt;b&gt;&lt;blockquote&gt;SENTENCED TO BE A HERO&lt;/blockquote&gt;&lt;/b&gt;</code>")
+    await message.reply_text("📝 **Naya HTML Caption bhejo.**\n\nExample:\n<code>&lt;blockquote&gt;SENTENCED TO BE A HERO&lt;/blockquote&gt;</code>")
 
 @app.on_message(filters.text & filters.private)
 async def handle_text(client, message):
@@ -56,11 +57,10 @@ async def handle_text(client, message):
     state = user_data[user_id].get("state")
 
     if state == "awaiting_caption":
-        # Hum message.text.html use nahi karenge kyunki wo entities ko badal deta hai
-        # Hum seedha raw text uthayenge aur Pyrogram ko HTML parse karne ko kahenge
+        # Raw HTML template save ho raha hai
         user_data[user_id]["new_caption"] = message.text
         user_data[user_id]["state"] = "awaiting_thumb"
-        await message.reply_text("🖼️ **Ab Thumbnail bhejo** ya `no` likho.")
+        await message.reply_text("🖼️ **Thumbnail bhejo** ya `no` likho.")
     
     elif state == "awaiting_thumb" and message.text.lower() == "no":
         user_data[user_id]["thumb_path"] = None
@@ -79,32 +79,33 @@ async def final_process(client, message, user_id):
     caption_tpl = user_data[user_id]["new_caption"]
     thumb = user_data[user_id].get("thumb_path")
     
-    sts = await message.reply_text("⚡ **Quotes apply ho rahe hain...**")
+    sts = await message.reply_text("⚡ **Applying Quotes... Wait.**")
     
     for vid in queue:
         try:
             ep_no = extract_episode(vid.caption or "")
-            # Custom replacement for {ep}
-            final_cap = re.sub(r'\{ep\}', ep_no, caption_tpl, flags=re.IGNORECASE)
+            # {ep} replace karo correctly
+            final_cap = caption_tpl.replace("{ep}", ep_no).replace("{Ep}", ep_no)
             
+            # send_video method with explicit parse_mode
             await client.send_video(
                 chat_id=user_id,
                 video=vid.video.file_id,
                 caption=final_cap,
                 thumb=thumb,
-                parse_mode=enums.ParseMode.HTML, # 👈 Yahi Quotes enable karega
                 duration=vid.video.duration,
                 width=vid.video.width,
                 height=vid.video.height,
-                supports_streaming=True
+                supports_streaming=True,
+                parse_mode=enums.ParseMode.HTML # Force HTML
             )
-            await asyncio.sleep(0.6)
+            await asyncio.sleep(0.8) # Anti-flood
         except Exception as e:
-            await message.reply_text(f"❌ Formatting Error: {e}\n\nCheck karein ki HTML tags sahi se close hue hain ya nahi.")
+            await message.reply_text(f"❌ Error: {e}")
 
     if thumb and os.path.exists(thumb): os.remove(thumb)
     del user_data[user_id]
-    await sts.edit_text("✅ **All Done! Quotes aur Bold apply ho gaye.**")
+    await sts.edit_text("✅ **Sahi hai bhai! Check karo.**")
 
 if __name__ == "__main__":
     app.run()
