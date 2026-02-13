@@ -1,271 +1,270 @@
 import os
-import json
 import re
-import logging
-from functools import wraps
-from typing import Dict, Any
+from telegram import Update, ForceReply
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
+from telegram.constants import ParseMode
 
-from telegram import Update
-from telegram.constants import ParseMode  # ✅ Yaha se import karo
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    filters,
-    ConversationHandler,
-    ContextTypes,
-)
+# States for conversation
+RECEIVING_VIDEOS, RECEIVING_CAPTION, RECEIVING_THUMBNAIL, PROCESSING = range(4)
 
-# -------------------- CONFIGURATION --------------------
-YOUR_USER_ID = 6728678197
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-DATA_FILE = "user_data.json"
+# Store user data
+user_sessions = {}
 
-COLLECTING_VIDEOS, WAITING_CAPTION, WAITING_THUMBNAIL = range(3)
+class UserSession:
+    def __init__(self):
+        self.videos = []
+        self.current_video_index = 0
+        self.new_caption = None
+        self.new_thumbnail = None
 
-# -------------------- PERSISTENCE --------------------
-def load_data() -> Dict[int, Any]:
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, "r") as f:
-            return json.load(f)
-    return {}
-
-def save_data(data: Dict[int, Any]):
-    with open(DATA_FILE, "w") as f:
-        json.dump(data, f, indent=2)
-
-# -------------------- AUTHORISATION --------------------
-def restricted(func):
-    @wraps(func)
-    async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if update.effective_user.id != YOUR_USER_ID:
-            await update.message.reply_text("⛔ Unauthorized.")
-            return
-        return await func(update, context)
-    return wrapped
-
-# -------------------- HELPER FUNCTIONS --------------------
-def extract_episode_number(original_caption: str) -> str:
-    if not original_caption:
-        return ""
-    match = re.search(r"[Ee]p(?:isode)?\.?\s*(\d+)", original_caption)
-    return match.group(1) if match else ""
-
-def replace_ep_placeholder(new_caption: str, ep_number: str) -> str:
-    if not new_caption:
-        return ""
-    return new_caption.replace("{Ep}", ep_number)
-
-# -------------------- COMMAND HANDLERS --------------------
-@restricted
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    data = load_data()
+def extract_episode_number(caption):
+    """Extract episode number from caption"""
+    if not caption:
+        return None
     
-    data[user_id] = {
-        "state": COLLECTING_VIDEOS,
-        "videos": [],
-        "current_idx": 0,
-        "temp_caption": None,
-    }
-    save_data(data)
+    # Look for patterns like "Ep 1", "Episode 1", "E01", etc.
+    patterns = [
+        r'[Ee]p(?:isode)?\s*(\d+)',
+        r'[Ee](\d+)',
+        r'#(\d+)',
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, caption)
+        if match:
+            return match.group(1)
+    return None
+
+def format_caption(caption, episode_number):
+    """Replace {Ep} with actual episode number and format text"""
+    if not caption:
+        return ""
+    
+    # Replace {Ep} with episode number
+    if episode_number:
+        caption = caption.replace("{Ep}", episode_number)
+        caption = caption.replace("{ep}", episode_number)
+    
+    # Handle quote formatting: >>text<< becomes quote
+    caption = re.sub(r'>>(.*?)<<', r'<blockquote>\1</blockquote>', caption)
+    
+    # Handle bold formatting: **text** becomes <b>text</b>
+    # Use regex to properly match pairs
+    caption = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', caption)
+    
+    return caption
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start command handler"""
+    user_id = update.effective_user.id
+    user_sessions[user_id] = UserSession()
     
     await update.message.reply_text(
-        "⚡ *Super Fast Caption Changer*\n\n"
-        "Ab main videos ko **download nahi karunga** - seedha caption edit karke bhej dunga!\n"
-        "Jitni videos bhejni hain bhejo, phir `/done` karo.",
-        parse_mode=ParseMode.MARKDOWN,
+        "🎬 *Caption Changer Bot* 🎬\n\n"
+        "Bhai, videos bhejo ek ke baad ek! 📹\n"
+        "Jab sab videos bhej do, toh /done command send karo.\n\n"
+        "Example:\n"
+        "1. Videos bhejo\n"
+        "2. /done type karo\n"
+        "3. Caption provide karo\n"
+        "4. Thumbnail bhejo (ya 'no' likho)\n"
+        "5. Bot tumhe modified videos dega! ✨",
+        parse_mode=ParseMode.MARKDOWN
     )
-    return COLLECTING_VIDEOS
-
-@restricted
-async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    data = load_data()
-    user_data = data.get(user_id)
     
-    if not user_data or user_data.get("state") != COLLECTING_VIDEOS:
-        return
+    return RECEIVING_VIDEOS
+
+async def receive_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Receive videos from user"""
+    user_id = update.effective_user.id
+    
+    if user_id not in user_sessions:
+        user_sessions[user_id] = UserSession()
+    
+    session = user_sessions[user_id]
     
     video = update.message.video
-    if not video:
-        return
+    caption = update.message.caption or ""
     
-    user_data["videos"].append({
-        "file_id": video.file_id,
-        "caption": update.message.caption or "",
+    # Extract episode number from original caption
+    episode_number = extract_episode_number(caption)
+    
+    session.videos.append({
+        'file_id': video.file_id,
+        'original_caption': caption,
+        'episode_number': episode_number,
+        'width': video.width,
+        'height': video.height,
+        'duration': video.duration,
+        'thumb': video.thumb.file_id if video.thumb else None
     })
-    save_data(data)
-    
-    await update.message.reply_text(f"✅ Video {len(user_data['videos'])} stored. (Fast mode)")
-    return COLLECTING_VIDEOS
-
-@restricted
-async def done_collecting(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    data = load_data()
-    user_data = data.get(user_id)
-    
-    if not user_data or not user_data.get("videos"):
-        await update.message.reply_text("❌ No videos found.")
-        return ConversationHandler.END
-    
-    user_data["state"] = WAITING_CAPTION
-    user_data["current_idx"] = 0
-    save_data(data)
-    
-    await ask_for_caption(update, context, user_id)
-    return WAITING_CAPTION
-
-async def ask_for_caption(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int):
-    data = load_data()
-    user_data = data[user_id]
-    idx = user_data["current_idx"]
-    total = len(user_data["videos"])
-    
-    await context.bot.send_message(
-        chat_id=user_id,
-        text=f"✏️ *Video {idx+1} of {total}*\n"
-             "Naya caption bhejo. Use `{{Ep}}` for episode number.\n"
-             "HTML tags allowed: `<b>bold</b>`, `<blockquote>quote</blockquote>`\n"
-             "`/skip` - original caption rahega",
-        parse_mode=ParseMode.HTML,
-    )
-
-@restricted
-async def receive_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    data = load_data()
-    user_data = data.get(user_id)
-    
-    if not user_data or user_data.get("state") != WAITING_CAPTION:
-        return
-    
-    idx = user_data["current_idx"]
-    video_info = user_data["videos"][idx]
-    
-    if update.message.text == "/skip":
-        new_caption = video_info["caption"]
-    else:
-        new_caption = update.message.text
-    
-    ep_number = extract_episode_number(video_info["caption"])
-    new_caption = replace_ep_placeholder(new_caption, ep_number)
-    
-    user_data["temp_caption"] = new_caption
-    user_data["state"] = WAITING_THUMBNAIL
-    save_data(data)
     
     await update.message.reply_text(
-        f"🖼️ Thumbnail bhejo (photo) ya `no text` likho.",
-        parse_mode=ParseMode.MARKDOWN,
+        f"✅ Video #{len(session.videos)} received!\n"
+        f"Original caption: {caption[:50]}...\n"
+        f"Episode: {episode_number or 'Not found'}\n\n"
+        "Aur videos bhejo ya /done command do!"
     )
-    return WAITING_THUMBNAIL
+    
+    return RECEIVING_VIDEOS
 
-@restricted
-async def receive_thumbnail(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def done_receiving(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """User finished sending videos"""
     user_id = update.effective_user.id
-    data = load_data()
-    user_data = data.get(user_id)
     
-    if not user_data or user_data.get("state") != WAITING_THUMBNAIL:
-        return
+    if user_id not in user_sessions or not user_sessions[user_id].videos:
+        await update.message.reply_text("Pehle videos bhejo bhai! 😅")
+        return ConversationHandler.END
     
-    idx = user_data["current_idx"]
-    video_info = user_data["videos"][idx]
-    new_caption = user_data["temp_caption"]
-    total = len(user_data["videos"])
+    session = user_sessions[user_id]
+    session.current_video_index = 0
     
-    thumbnail_file_id = None
+    await update.message.reply_text(
+        f"👍 Total {len(session.videos)} videos received!\n\n"
+        f"📝 Ab Video #{session.current_video_index + 1} ke liye caption bhejo:\n\n"
+        "Tips:\n"
+        "• **text** for bold\n"
+        "• >>text<< for quote\n"
+        "• {Ep} will be replaced with episode number\n\n"
+        f"Original caption: {session.videos[session.current_video_index]['original_caption'][:100]}"
+    )
+    
+    return RECEIVING_CAPTION
+
+async def receive_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Receive new caption from user"""
+    user_id = update.effective_user.id
+    session = user_sessions[user_id]
+    
+    session.new_caption = update.message.text
+    
+    await update.message.reply_text(
+        f"✅ Caption saved for Video #{session.current_video_index + 1}!\n\n"
+        "🖼️ Ab thumbnail bhejo:\n"
+        "• New photo bhejo for custom thumbnail\n"
+        "• 'no' likho to skip thumbnail change"
+    )
+    
+    return RECEIVING_THUMBNAIL
+
+async def receive_thumbnail(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Receive thumbnail from user"""
+    user_id = update.effective_user.id
+    session = user_sessions[user_id]
+    
+    # Check if user sent photo or text 'no'
     if update.message.photo:
-        thumbnail_file_id = update.message.photo[-1].file_id
-    elif update.message.text and update.message.text.lower() == "no text":
-        thumbnail_file_id = None
+        # Get the largest photo
+        session.new_thumbnail = update.message.photo[-1].file_id
+        await update.message.reply_text("✅ Thumbnail saved!")
+    elif update.message.text and update.message.text.lower() == 'no':
+        session.new_thumbnail = None
+        await update.message.reply_text("✅ Original thumbnail will be kept!")
     else:
-        await update.message.reply_text("⚠️ Photo ya `no text` bhejo.")
-        return WAITING_THUMBNAIL
+        await update.message.reply_text("❌ Please send photo or type 'no'")
+        return RECEIVING_THUMBNAIL
     
-    try:
-        await context.bot.send_video(
-            chat_id=user_id,
-            video=video_info["file_id"],
-            caption=new_caption,
-            thumbnail=thumbnail_file_id,
-            parse_mode=ParseMode.HTML,
-            supports_streaming=True,
+    # Process this video
+    await process_and_send_video(update, context, user_id, session)
+    
+    # Move to next video or finish
+    session.current_video_index += 1
+    
+    if session.current_video_index < len(session.videos):
+        await update.message.reply_text(
+            f"📝 Video #{session.current_video_index + 1} ke liye caption bhejo:\n\n"
+            f"Original caption: {session.videos[session.current_video_index]['original_caption'][:100]}"
         )
-    except Exception as e:
-        await context.bot.send_message(
-            chat_id=user_id,
-            text=f"❌ Error: {e}",
-        )
-    
-    user_data["current_idx"] += 1
-    user_data["temp_caption"] = None
-    
-    if user_data["current_idx"] < total:
-        user_data["state"] = WAITING_CAPTION
-        save_data(data)
-        await ask_for_caption(update, context, user_id)
-        return WAITING_CAPTION
+        return RECEIVING_CAPTION
     else:
-        user_data["state"] = COLLECTING_VIDEOS
-        user_data["videos"] = []
-        user_data["current_idx"] = 0
-        save_data(data)
-        await context.bot.send_message(
-            chat_id=user_id,
-            text="✅ *Sab videos process ho gaye!* ⚡\n/start se naya batch.",
-            parse_mode=ParseMode.MARKDOWN,
+        await update.message.reply_text(
+            "🎉 Sab videos process ho gaye!\n\n"
+            "Aur videos process karne ke liye /start command use karo! 😊"
         )
+        del user_sessions[user_id]
         return ConversationHandler.END
 
-@restricted
+async def process_and_send_video(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int, session: UserSession):
+    """Process and send video with new caption and thumbnail"""
+    video_data = session.videos[session.current_video_index]
+    episode_number = video_data['episode_number']
+    
+    # Format caption with episode number and text formatting
+    final_caption = format_caption(session.new_caption, episode_number)
+    
+    # Send video with new caption and thumbnail
+    try:
+        if session.new_thumbnail:
+            await context.bot.send_video(
+                chat_id=user_id,
+                video=video_data['file_id'],
+                caption=final_caption,
+                parse_mode=ParseMode.HTML,
+                thumbnail=session.new_thumbnail,
+                width=video_data['width'],
+                height=video_data['height'],
+                duration=video_data['duration']
+            )
+        else:
+            await context.bot.send_video(
+                chat_id=user_id,
+                video=video_data['file_id'],
+                caption=final_caption,
+                parse_mode=ParseMode.HTML,
+                width=video_data['width'],
+                height=video_data['height'],
+                duration=video_data['duration']
+            )
+        
+        await update.message.reply_text(f"✅ Video #{session.current_video_index + 1} sent successfully!")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error sending video: {str(e)}")
+
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cancel the conversation"""
     user_id = update.effective_user.id
-    data = load_data()
-    if user_id in data:
-        data[user_id] = {"state": COLLECTING_VIDEOS, "videos": [], "current_idx": 0}
-        save_data(data)
-    await update.message.reply_text("🚫 Cancelled.")
+    if user_id in user_sessions:
+        del user_sessions[user_id]
+    
+    await update.message.reply_text("❌ Process cancelled! /start se phir shuru karo.")
     return ConversationHandler.END
 
-# -------------------- MAIN --------------------
 def main():
-    logging.basicConfig(
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", 
-        level=logging.INFO
-    )
+    """Main function to run the bot"""
+    # Get bot token from environment variable
+    TOKEN = os.environ.get('BOT_TOKEN')
     
-    if not BOT_TOKEN:
-        raise ValueError("BOT_TOKEN missing! Railway me variable add karo.")
+    if not TOKEN:
+        print("❌ Error: BOT_TOKEN environment variable not set!")
+        print("Set it using: export BOT_TOKEN='your_bot_token_here'")
+        return
     
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    # Create application
+    application = Application.builder().token(TOKEN).build()
     
+    # Create conversation handler
     conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
+        entry_points=[CommandHandler('start', start)],
         states={
-            COLLECTING_VIDEOS: [
-                MessageHandler(filters.VIDEO, handle_video),
-                CommandHandler("done", done_collecting),
+            RECEIVING_VIDEOS: [
+                MessageHandler(filters.VIDEO, receive_video),
+                CommandHandler('done', done_receiving),
             ],
-            WAITING_CAPTION: [
+            RECEIVING_CAPTION: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_caption),
-                CommandHandler("skip", receive_caption),
             ],
-            WAITING_THUMBNAIL: [
-                MessageHandler(filters.PHOTO, receive_thumbnail),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_thumbnail),
+            RECEIVING_THUMBNAIL: [
+                MessageHandler(filters.PHOTO | (filters.TEXT & ~filters.COMMAND), receive_thumbnail),
             ],
         },
-        fallbacks=[CommandHandler("cancel", cancel)],
+        fallbacks=[CommandHandler('cancel', cancel)],
     )
     
-    app.add_handler(conv_handler)
-    app.add_handler(CommandHandler("cancel", cancel))
+    application.add_handler(conv_handler)
     
-    print("🤖 Bot is running in SUPER FAST mode...")
-    app.run_polling()
+    # Start bot
+    print("🤖 Bot is starting...")
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
