@@ -1,189 +1,282 @@
-import re
 import os
-from telegram import Update
+import json
+import re
+import logging
+from functools import wraps
+from typing import Dict, Any
+
+from telegram import Update, ParseMode
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,
     filters,
+    ConversationHandler,
     ContextTypes,
 )
 
-TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = 6728678197
+# -------------------- CONFIGURATION --------------------
+YOUR_USER_ID = 6728678197
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+DATA_FILE = "user_data.json"
 
-users = {}
+COLLECTING_VIDEOS, WAITING_CAPTION, WAITING_THUMBNAIL = range(3)
 
-# 🔐 Admin Check
-def is_admin(user_id):
-    return user_id == ADMIN_ID
+# -------------------- PERSISTENCE --------------------
+def load_data() -> Dict[int, Any]:
+    if os.path.exists(DATA_FILE):
+        with open(DATA_FILE, "r") as f:
+            return json.load(f)
+    return {}
 
-# 🔥 Episode Extractor
-def extract_episode(text):
-    if not text:
+def save_data(data: Dict[int, Any]):
+    with open(DATA_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+# -------------------- AUTHORISATION --------------------
+def restricted(func):
+    @wraps(func)
+    async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if update.effective_user.id != YOUR_USER_ID:
+            await update.message.reply_text("⛔ Unauthorized.")
+            return
+        return await func(update, context)
+    return wrapped
+
+# -------------------- HELPER FUNCTIONS --------------------
+def extract_episode_number(original_caption: str) -> str:
+    if not original_caption:
         return ""
+    match = re.search(r"[Ee]p(?:isode)?\.?\s*(\d+)", original_caption)
+    return match.group(1) if match else ""
 
-    text = text.replace("\xa0", " ")
-
-    patterns = [
-        r"[Ee]pisode\s*[:\-]?\s*(\d+)",
-        r"[Ee]p\s*[:\-]?\s*(\d+)",
-        r"[\|\-\•\⌬\‣]*\s*[Ee]pisode\s*[:\-]?\s*(\d+)",
-        r"\bE(\d+)\b"
-    ]
-
-    for pattern in patterns:
-        match = re.search(pattern, text)
-        if match:
-            return match.group(1).zfill(2)
-
-    return ""
-
-# ✨ Convert Markdown Style → HTML
-def convert_to_html(text):
-    if not text:
+def replace_ep_placeholder(new_caption: str, ep_number: str) -> str:
+    if not new_caption:
         return ""
+    return new_caption.replace("{Ep}", ep_number)
 
-    lines = text.split("\n")
-    new_lines = []
-
-    for line in lines:
-        line = line.rstrip()
-
-        # Blockquote support
-        if line.startswith(">"):
-            content = line[1:].strip()
-            line = f"<blockquote>{content}</blockquote>"
-
-        new_lines.append(line)
-
-    text = "\n".join(new_lines)
-
-    # Bold *text*
-    text = re.sub(r"\*(.*?)\*", r"<b>\1</b>", text)
-
-    return text
-
-# 🚀 Start
+# -------------------- COMMAND HANDLERS --------------------
+@restricted
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return
-
-    users[ADMIN_ID] = {
-        "videos": [],
-        "template": None,
-        "thumb": None,
-        "waiting_thumb": False
+    user_id = update.effective_user.id
+    data = load_data()
+    
+    data[user_id] = {
+        "state": COLLECTING_VIDEOS,
+        "videos": [],  # sirf file_id aur caption store hoga
+        "current_idx": 0,
+        "temp_caption": None,
     }
-
+    save_data(data)
+    
     await update.message.reply_text(
-        "Admin Mode Activated 🔥\nSend multiple videos.\nThen type /done"
+        "⚡ *Super Fast Caption Changer*\n\n"
+        "Ab main videos ko **download nahi karunga** - seedha caption edit karke bhej dunga!\n"
+        "Jitni videos bhejni hain bhejo, phir `/done` karo.",
+        parse_mode=ParseMode.MARKDOWN,
     )
+    return COLLECTING_VIDEOS
 
-# 🎥 Save Videos
+@restricted
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
+    """Sirf file_id aur caption store karo - kuch download nahi"""
+    user_id = update.effective_user.id
+    data = load_data()
+    user_data = data.get(user_id)
+    
+    if not user_data or user_data.get("state") != COLLECTING_VIDEOS:
         return
-
+    
     video = update.message.video
-    caption = update.message.caption or ""
-    episode = extract_episode(caption)
-
-    users[ADMIN_ID]["videos"].append({
-        "file_id": video.file_id,
-        "episode": episode
-    })
-
-    await update.message.reply_text("Video Saved ✅")
-
-# ✅ Done
-async def done(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
+    if not video:
         return
+    
+    # ✅ Bas ye do cheezein store karo - file_id aur caption
+    user_data["videos"].append({
+        "file_id": video.file_id,
+        "caption": update.message.caption or "",
+    })
+    save_data(data)
+    
+    await update.message.reply_text(f"✅ Video {len(user_data['videos'])} stored. (Fast mode)")
+    return COLLECTING_VIDEOS
 
-    await update.message.reply_text(
-        "Send new caption template.\nUse {Ep} for episode number."
+@restricted
+async def done_collecting(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    data = load_data()
+    user_data = data.get(user_id)
+    
+    if not user_data or not user_data.get("videos"):
+        await update.message.reply_text("❌ No videos found.")
+        return ConversationHandler.END
+    
+    user_data["state"] = WAITING_CAPTION
+    user_data["current_idx"] = 0
+    save_data(data)
+    
+    await ask_for_caption(update, context, user_id)
+    return WAITING_CAPTION
+
+async def ask_for_caption(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int):
+    data = load_data()
+    user_data = data[user_id]
+    idx = user_data["current_idx"]
+    total = len(user_data["videos"])
+    
+    await context.bot.send_message(
+        chat_id=user_id,
+        text=f"✏️ *Video {idx+1} of {total}*\n"
+             "Naya caption bhejo. Use `{Ep}` for episode number.\n"
+             "HTML tags allowed: `<b>bold</b>`, `<blockquote>quote</blockquote>`\n"
+             "`/skip` - original caption rahega",
+        parse_mode=ParseMode.HTML,
     )
 
-# 📝 Handle Text
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
+@restricted
+async def receive_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    data = load_data()
+    user_data = data.get(user_id)
+    
+    if not user_data or user_data.get("state") != WAITING_CAPTION:
         return
+    
+    idx = user_data["current_idx"]
+    video_info = user_data["videos"][idx]
+    
+    # Caption decide karo
+    if update.message.text == "/skip":
+        new_caption = video_info["caption"]
+    else:
+        new_caption = update.message.text
+    
+    # Episode number replace karo
+    ep_number = extract_episode_number(video_info["caption"])
+    new_caption = replace_ep_placeholder(new_caption, ep_number)
+    
+    user_data["temp_caption"] = new_caption
+    user_data["state"] = WAITING_THUMBNAIL
+    save_data(data)
+    
+    await update.message.reply_text(
+        f"🖼️ Thumbnail bhejo (photo) ya `no text` likho.",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+    return WAITING_THUMBNAIL
 
-    data = users.get(ADMIN_ID)
-    if not data:
+@restricted
+async def receive_thumbnail(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """🚀 FASTEST METHOD - Direct file_id se video bhejo, 0 download!"""
+    user_id = update.effective_user.id
+    data = load_data()
+    user_data = data.get(user_id)
+    
+    if not user_data or user_data.get("state") != WAITING_THUMBNAIL:
         return
-
-    if not data["template"]:
-        data["template"] = update.message.text
-        data["waiting_thumb"] = True
-        await update.message.reply_text(
-            "Send thumbnail image OR type 'no'"
-        )
-        return
-
-    if data["waiting_thumb"] and update.message.text.lower() == "no":
-        data["waiting_thumb"] = False
-        await process_videos(update, context)
-
-# 🖼 Thumbnail
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return
-
-    data = users.get(ADMIN_ID)
-    if not data:
-        return
-
-    if data["waiting_thumb"]:
-        data["thumb"] = update.message.photo[-1].file_id
-        data["waiting_thumb"] = False
-        await process_videos(update, context)
-
-# ⚡ Ultra Fast Process
-async def process_videos(update, context):
-    data = users.get(ADMIN_ID)
-    if not data:
-        return
-
-    await update.message.reply_text("Processing ⚡")
-
-    for vid in data["videos"]:
-        caption = data["template"]
-
-        ep = vid["episode"] if vid["episode"] else "??"
-        caption = caption.replace("{Ep}", ep)
-
-        caption = convert_to_html(caption)
-
+    
+    idx = user_data["current_idx"]
+    video_info = user_data["videos"][idx]
+    new_caption = user_data["temp_caption"]
+    total = len(user_data["videos"])
+    
+    # Thumbnail decide karo
+    thumbnail_file_id = None
+    if update.message.photo:
+        thumbnail_file_id = update.message.photo[-1].file_id
+    elif update.message.text and update.message.text.lower() == "no text":
+        thumbnail_file_id = None
+    else:
+        await update.message.reply_text("⚠️ Photo ya `no text` bhejo.")
+        return WAITING_THUMBNAIL
+    
+    # ⚡ SUPER FAST - Direct file_id use karo, koi download/upload nahi!
+    try:
+        start_time = update.message.date.timestamp()
+        
         await context.bot.send_video(
-            chat_id=ADMIN_ID,
-            video=vid["file_id"],
-            caption=caption,
-            parse_mode="HTML",
-            thumbnail=data["thumb"] if data["thumb"] else None
+            chat_id=user_id,
+            video=video_info["file_id"],  # ✅ Direct Telegram server se
+            caption=new_caption,
+            thumbnail=thumbnail_file_id,  # ✅ Naya thumbnail
+            parse_mode=ParseMode.HTML,
+            supports_streaming=True,      # ✅ Instant play
         )
+        
+        # Speed test (optional)
+        import time
+        speed = time.time() - start_time
+        logging.info(f"Video {idx+1} processed in {speed:.2f}s")
+        
+    except Exception as e:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=f"❌ Error: {e}",
+        )
+    
+    # Next video ya finish
+    user_data["current_idx"] += 1
+    user_data["temp_caption"] = None
+    
+    if user_data["current_idx"] < total:
+        user_data["state"] = WAITING_CAPTION
+        save_data(data)
+        await ask_for_caption(update, context, user_id)
+        return WAITING_CAPTION
+    else:
+        user_data["state"] = COLLECTING_VIDEOS
+        user_data["videos"] = []
+        user_data["current_idx"] = 0
+        save_data(data)
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="✅ *Sab videos process ho gaye!* ⚡\n/start se naya batch.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return ConversationHandler.END
 
-    await update.message.reply_text("Done 🚀")
+@restricted
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    data = load_data()
+    if user_id in data:
+        data[user_id] = {"state": COLLECTING_VIDEOS, "videos": [], "current_idx": 0}
+        save_data(data)
+    await update.message.reply_text("🚫 Cancelled.")
+    return ConversationHandler.END
 
-    users[ADMIN_ID] = {
-        "videos": [],
-        "template": None,
-        "thumb": None,
-        "waiting_thumb": False
-    }
-
-# 🏁 Main
+# -------------------- MAIN --------------------
 def main():
-    app = ApplicationBuilder().token(TOKEN).build()
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("done", done))
-    app.add_handler(MessageHandler(filters.VIDEO, handle_video))
-    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-
-    print("PRO Caption Bot Running ⚡")
+    logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
+    
+    if not BOT_TOKEN:
+        raise ValueError("BOT_TOKEN missing!")
+    
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("start", start)],
+        states={
+            COLLECTING_VIDEOS: [
+                MessageHandler(filters.VIDEO, handle_video),
+                CommandHandler("done", done_collecting),
+            ],
+            WAITING_CAPTION: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_caption),
+                CommandHandler("skip", receive_caption),
+            ],
+            WAITING_THUMBNAIL: [
+                MessageHandler(filters.PHOTO, receive_thumbnail),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_thumbnail),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+    
+    app.add_handler(conv_handler)
+    app.add_handler(CommandHandler("cancel", cancel))
+    
+    print("🤖 Bot is running in SUPER FAST mode...")
     app.run_polling()
 
 if __name__ == "__main__":
