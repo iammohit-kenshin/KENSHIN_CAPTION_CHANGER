@@ -5,7 +5,8 @@ import logging
 from functools import wraps
 from typing import Dict, Any
 
-from telegram import Update, ParseMode
+from telegram import Update
+from telegram.constants import ParseMode  # ✅ Yaha se import karo
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -63,7 +64,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     data[user_id] = {
         "state": COLLECTING_VIDEOS,
-        "videos": [],  # sirf file_id aur caption store hoga
+        "videos": [],
         "current_idx": 0,
         "temp_caption": None,
     }
@@ -79,7 +80,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @restricted
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Sirf file_id aur caption store karo - kuch download nahi"""
     user_id = update.effective_user.id
     data = load_data()
     user_data = data.get(user_id)
@@ -91,7 +91,6 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not video:
         return
     
-    # ✅ Bas ye do cheezein store karo - file_id aur caption
     user_data["videos"].append({
         "file_id": video.file_id,
         "caption": update.message.caption or "",
@@ -127,7 +126,7 @@ async def ask_for_caption(update: Update, context: ContextTypes.DEFAULT_TYPE, us
     await context.bot.send_message(
         chat_id=user_id,
         text=f"✏️ *Video {idx+1} of {total}*\n"
-             "Naya caption bhejo. Use `{Ep}` for episode number.\n"
+             "Naya caption bhejo. Use `{{Ep}}` for episode number.\n"
              "HTML tags allowed: `<b>bold</b>`, `<blockquote>quote</blockquote>`\n"
              "`/skip` - original caption rahega",
         parse_mode=ParseMode.HTML,
@@ -145,13 +144,11 @@ async def receive_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
     idx = user_data["current_idx"]
     video_info = user_data["videos"][idx]
     
-    # Caption decide karo
     if update.message.text == "/skip":
         new_caption = video_info["caption"]
     else:
         new_caption = update.message.text
     
-    # Episode number replace karo
     ep_number = extract_episode_number(video_info["caption"])
     new_caption = replace_ep_placeholder(new_caption, ep_number)
     
@@ -167,7 +164,6 @@ async def receive_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @restricted
 async def receive_thumbnail(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """🚀 FASTEST METHOD - Direct file_id se video bhejo, 0 download!"""
     user_id = update.effective_user.id
     data = load_data()
     user_data = data.get(user_id)
@@ -180,7 +176,6 @@ async def receive_thumbnail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     new_caption = user_data["temp_caption"]
     total = len(user_data["videos"])
     
-    # Thumbnail decide karo
     thumbnail_file_id = None
     if update.message.photo:
         thumbnail_file_id = update.message.photo[-1].file_id
@@ -190,31 +185,21 @@ async def receive_thumbnail(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Photo ya `no text` bhejo.")
         return WAITING_THUMBNAIL
     
-    # ⚡ SUPER FAST - Direct file_id use karo, koi download/upload nahi!
     try:
-        start_time = update.message.date.timestamp()
-        
         await context.bot.send_video(
             chat_id=user_id,
-            video=video_info["file_id"],  # ✅ Direct Telegram server se
+            video=video_info["file_id"],
             caption=new_caption,
-            thumbnail=thumbnail_file_id,  # ✅ Naya thumbnail
+            thumbnail=thumbnail_file_id,
             parse_mode=ParseMode.HTML,
-            supports_streaming=True,      # ✅ Instant play
+            supports_streaming=True,
         )
-        
-        # Speed test (optional)
-        import time
-        speed = time.time() - start_time
-        logging.info(f"Video {idx+1} processed in {speed:.2f}s")
-        
     except Exception as e:
         await context.bot.send_message(
             chat_id=user_id,
             text=f"❌ Error: {e}",
         )
     
-    # Next video ya finish
     user_data["current_idx"] += 1
     user_data["temp_caption"] = None
     
@@ -247,10 +232,13 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # -------------------- MAIN --------------------
 def main():
-    logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
+    logging.basicConfig(
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", 
+        level=logging.INFO
+    )
     
     if not BOT_TOKEN:
-        raise ValueError("BOT_TOKEN missing!")
+        raise ValueError("BOT_TOKEN missing! Railway me variable add karo.")
     
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     
