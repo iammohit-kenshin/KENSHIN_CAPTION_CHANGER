@@ -1,111 +1,121 @@
 import os
-import re
-import asyncio
-from pyrogram import Client, filters, enums
+from pyrogram import Client, filters
 from pyrogram.types import Message
 
-# --- CONFIGURATION ---
-API_ID = int(os.environ.get("API_ID", "37407868"))
-API_HASH = os.environ.get("API_HASH", "yahan_hash_daalo")
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "yahan_bot_token")
-OWNER_ID = int(os.environ.get("OWNER_ID", "6728678197"))
+# ================== CONFIG (Railway Variables) ==================
+
+API_ID = int(os.environ.get("API_ID"))
+API_HASH = os.environ.get("API_HASH")
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+ADMIN_ID = int(os.environ.get("ADMIN_ID"))
+
+# ================================================================
 
 app = Client(
-    "CaptionBot",
+    "UltraFastThumbBot",
     api_id=API_ID,
     api_hash=API_HASH,
-    bot_token=BOT_TOKEN,
-    parse_mode=enums.ParseMode.HTML # Global HTML support
+    bot_token=BOT_TOKEN
 )
 
 user_data = {}
 
-def extract_episode(caption):
-    if not caption: return "N/A"
-    # Yuri on Ice wale format se episode nikalne ke liye
-    match = re.search(r'(?:Episode|Ep|E)\s*[:\-\s]*(\d+)', caption, re.IGNORECASE)
-    if not match:
-        match = re.search(r'(\d+)', caption)
-    return match.group(1) if match else "N/A"
+# ================== START COMMAND ==================
 
-@app.on_message(filters.command("start") & filters.private)
-async def start(client, message):
-    if message.from_user.id != OWNER_ID: return
-    user_data[message.from_user.id] = {"queue": []}
-    await message.reply_text("✅ **Bot Fixed & Quote Ready!**\nAb videos order se bhejiye.")
+@app.on_message(filters.command("start"))
+async def start_handler(client, message: Message):
+    if message.from_user.id == ADMIN_ID:
+        await message.reply("🔥 Ultra Fast Thumbnail Bot Ready!")
+    else:
+        await message.reply("⛔ Admin Only Bot")
 
-@app.on_message(filters.video & filters.private)
-async def collect_videos(client, message: Message):
-    if message.from_user.id != OWNER_ID: return
+# ================== SAVE VIDEO ==================
+
+@app.on_message(filters.video & filters.user(ADMIN_ID))
+async def save_video(client, message: Message):
+
+    user_data[message.from_user.id] = {
+        "file_id": message.video.file_id,
+        "duration": message.video.duration,
+        "width": message.video.width,
+        "height": message.video.height,
+        "step": None
+    }
+
+    await message.reply("✅ Video Saved!\n\nAb /done likho.")
+
+# ================== DONE COMMAND ==================
+
+@app.on_message(filters.command("done") & filters.user(ADMIN_ID))
+async def done_handler(client, message: Message):
+
+    if message.from_user.id not in user_data:
+        await message.reply("⚠️ Pehle video bhejo.")
+        return
+
+    user_data[message.from_user.id]["step"] = "episode"
+    await message.reply("📌 Episode number bhejo.")
+
+# ================== MAIN PROCESS SYSTEM ==================
+
+@app.on_message(filters.user(ADMIN_ID))
+async def process_steps(client, message: Message):
+
     user_id = message.from_user.id
-    if user_id not in user_data: user_data[user_id] = {"queue": []}
-    user_data[user_id]["queue"].append(message)
-    await message.reply_text(f"📥 Queued: `{len(user_data[user_id]['queue'])}`", quote=True)
 
-@app.on_message(filters.command("done") & filters.private)
-async def mark_done(client, message):
-    user_id = message.from_user.id
-    if user_id not in user_data or not user_data[user_id]["queue"]:
-        return await message.reply_text("❌ Queue khali hai!")
-    user_data[user_id]["state"] = "awaiting_caption"
-    await message.reply_text("📝 **Naya HTML Caption bhejo.**\n\nExample:\n<code>&lt;blockquote&gt;SENTENCED TO BE A HERO&lt;/blockquote&gt;</code>")
+    if user_id not in user_data:
+        return
 
-@app.on_message(filters.text & filters.private)
-async def handle_text(client, message):
-    user_id = message.from_user.id
-    if user_id != OWNER_ID or user_id not in user_data: return
-    state = user_data[user_id].get("state")
+    step = user_data[user_id].get("step")
 
-    if state == "awaiting_caption":
-        # Raw HTML template save ho raha hai
-        user_data[user_id]["new_caption"] = message.text
-        user_data[user_id]["state"] = "awaiting_thumb"
-        await message.reply_text("🖼️ **Thumbnail bhejo** ya `no` likho.")
-    
-    elif state == "awaiting_thumb" and message.text.lower() == "no":
-        user_data[user_id]["thumb_path"] = None
-        await final_process(client, message, user_id)
+    # ===== EPISODE STEP =====
+    if step == "episode":
+        user_data[user_id]["episode"] = message.text.strip()
+        user_data[user_id]["step"] = "caption"
+        await message.reply("📝 HTML Caption bhejo.\n\n{Ep} likhoge to auto replace hoga.")
 
-@app.on_message(filters.photo & filters.private)
-async def handle_photo(client, message):
-    user_id = message.from_user.id
-    if user_id == OWNER_ID and user_data.get(user_id, {}).get("state") == "awaiting_thumb":
-        path = await message.download()
-        user_data[user_id]["thumb_path"] = path
-        await final_process(client, message, user_id)
+    # ===== CAPTION STEP =====
+    elif step == "caption":
+        ep = user_data[user_id]["episode"]
+        caption = message.text.replace("{Ep}", ep)
 
-async def final_process(client, message, user_id):
-    queue = sorted(user_data[user_id]["queue"], key=lambda x: x.id)
-    caption_tpl = user_data[user_id]["new_caption"]
-    thumb = user_data[user_id].get("thumb_path")
-    
-    sts = await message.reply_text("⚡ **Applying Quotes... Wait.**")
-    
-    for vid in queue:
-        try:
-            ep_no = extract_episode(vid.caption or "")
-            # {ep} replace karo correctly
-            final_cap = caption_tpl.replace("{ep}", ep_no).replace("{Ep}", ep_no)
-            
-            # send_video method with explicit parse_mode
-            await client.send_video(
-                chat_id=user_id,
-                video=vid.video.file_id,
-                caption=final_cap,
-                thumb=thumb,
-                duration=vid.video.duration,
-                width=vid.video.width,
-                height=vid.video.height,
-                supports_streaming=True,
-                parse_mode=enums.ParseMode.HTML # Force HTML
-            )
-            await asyncio.sleep(0.8) # Anti-flood
-        except Exception as e:
-            await message.reply_text(f"❌ Error: {e}")
+        user_data[user_id]["caption"] = caption
+        user_data[user_id]["step"] = "thumb"
 
-    if thumb and os.path.exists(thumb): os.remove(thumb)
-    del user_data[user_id]
-    await sts.edit_text("✅ **Sahi hai bhai! Check karo.**")
+        await message.reply("🖼 Thumbnail bhejo ya `no` likho.")
 
-if __name__ == "__main__":
-    app.run()
+    # ===== THUMB STEP =====
+    elif step == "thumb":
+
+        thumb_path = None
+
+        if message.text and message.text.lower() == "no":
+            thumb_path = None
+
+        elif message.photo:
+            thumb_path = await message.download()
+
+        data = user_data[user_id]
+
+        await client.send_video(
+            chat_id=message.chat.id,
+            video=data["file_id"],  # ⚡ SAME FILE_ID = ULTRA FAST
+            caption=data["caption"],
+            parse_mode="html",
+            thumb=thumb_path,
+            duration=data["duration"],
+            width=data["width"],
+            height=data["height"]
+        )
+
+        if thumb_path and os.path.exists(thumb_path):
+            os.remove(thumb_path)
+
+        await message.reply("🚀 Done Ultra Fast Successfully!")
+
+        user_data.pop(user_id)
+
+# ================== RUN ==================
+
+print("🔥 Bot Started Successfully!")
+app.run()
