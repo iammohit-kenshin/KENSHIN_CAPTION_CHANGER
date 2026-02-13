@@ -2,14 +2,14 @@ import os
 from pyrogram import Client, filters
 from pyrogram.types import Message
 
-# ================= CONFIG =================
+# ================== ENV CONFIG ==================
 
 API_ID = int(os.environ.get("API_ID"))
 API_HASH = os.environ.get("API_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID"))
 
-# ==========================================
+# ================================================
 
 app = Client(
     "UltraFastThumbBot",
@@ -20,13 +20,13 @@ app = Client(
 
 user_data = {}
 
-# ================= START =================
+# ================== START ==================
 
 @app.on_message(filters.command("start") & filters.user(ADMIN_ID))
 async def start_handler(client, message):
     await message.reply("🔥 Bot Active & Ready!")
 
-# ================= SAVE VIDEO =================
+# ================== SAVE VIDEO ==================
 
 @app.on_message(filters.video & filters.user(ADMIN_ID))
 async def save_video(client, message: Message):
@@ -41,7 +41,7 @@ async def save_video(client, message: Message):
 
     await message.reply("✅ Video Saved!\n\nAb /done likho.")
 
-# ================= DONE =================
+# ================== DONE ==================
 
 @app.on_message(filters.command("done") & filters.user(ADMIN_ID))
 async def done_handler(client, message):
@@ -53,7 +53,7 @@ async def done_handler(client, message):
     user_data[message.from_user.id]["step"] = "episode"
     await message.reply("📌 Episode number bhejo.")
 
-# ================= EPISODE =================
+# ================== TEXT HANDLER ==================
 
 @app.on_message(filters.text & filters.user(ADMIN_ID))
 async def text_handler(client, message: Message):
@@ -65,14 +65,14 @@ async def text_handler(client, message: Message):
 
     step = user_data[user_id].get("step")
 
-    # ---- EPISODE ----
+    # ---------- EPISODE ----------
     if step == "episode":
         user_data[user_id]["episode"] = message.text.strip()
         user_data[user_id]["step"] = "caption"
         await message.reply("📝 HTML Caption bhejo.\n\n{Ep} likhoge to auto replace hoga.")
         return
 
-    # ---- CAPTION ----
+    # ---------- CAPTION ----------
     if step == "caption":
         ep = user_data[user_id]["episode"]
         caption = message.text.replace("{Ep}", ep)
@@ -83,26 +83,27 @@ async def text_handler(client, message: Message):
         await message.reply("🖼 Thumbnail bhejo ya `no` likho.")
         return
 
-    # ---- NO THUMB ----
-    if step == "thumb" and message.text.lower() == "no":
+    # ---------- NO THUMB ----------
+    if step == "thumb":
+        if message.text and message.text.strip().lower() in ["no", "n", "skip"]:
 
-        data = user_data[user_id]
+            data = user_data[user_id]
 
-        await client.send_video(
-            chat_id=message.chat.id,
-            video=data["file_id"],
-            caption=data["caption"],
-            parse_mode="html",
-            duration=data["duration"],
-            width=data["width"],
-            height=data["height"]
-        )
+            await client.send_video(
+                chat_id=message.chat.id,
+                video=data["file_id"],  # ⚡ Ultra Fast
+                caption=data["caption"],
+                parse_mode="html",
+                duration=data["duration"],
+                width=data["width"],
+                height=data["height"]
+            )
 
-        await message.reply("🚀 Done Ultra Fast Successfully!")
-        user_data.pop(user_id)
+            await message.reply("🚀 Done Ultra Fast Successfully!")
+            user_data.pop(user_id)
         return
 
-# ================= THUMBNAIL PHOTO =================
+# ================== PHOTO HANDLER (THUMBNAIL) ==================
 
 @app.on_message(filters.photo & filters.user(ADMIN_ID))
 async def thumb_handler(client, message: Message):
@@ -129,12 +130,13 @@ async def thumb_handler(client, message: Message):
         height=data["height"]
     )
 
-    os.remove(thumb_path)
+    if os.path.exists(thumb_path):
+        os.remove(thumb_path)
 
     await message.reply("🚀 Done Ultra Fast Successfully!")
     user_data.pop(user_id)
 
-# ================= RUN =================
+# ================== RUN ==================
 
 print("🔥 Bot Started Successfully!")
 app.run()
